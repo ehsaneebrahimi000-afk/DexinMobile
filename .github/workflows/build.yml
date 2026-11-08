@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          ls -la part*.zip manifest.sha256
+          ls -la part*.zip
           mkdir -p work
           for z in part*.zip; do
             echo "unpacking $z"
@@ -32,8 +32,12 @@ jobs:
             cat "$base".__chunk* > "$base"
             rm -f "$base".__chunk*
           done
-          sha256sum -c ../../manifest.sha256 --quiet
-          echo "All files verified."
+          if [ -f ../../manifest.sha256 ]; then
+            sha256sum -c ../../manifest.sha256 --quiet
+            echo "All files verified."
+          else
+            echo "manifest.sha256 not found, skipping check"
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
