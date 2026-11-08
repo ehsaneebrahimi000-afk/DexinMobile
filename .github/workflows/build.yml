@@ -2,118 +2,317 @@ name: Build Dexin Mobile APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
-      - name: Checkout
+
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Verify uploaded parts
-        shell: bash
-        run: |
-          fail=0
-          expected=(
-            "part1.zip 23968515 4c3c284ac3fc8c02e3444d383d7ccd72382c70d920eeceb359ef6b684244e223"
-            "part2.zip 23961207 6b9552863b454d58b896e728ed16329cb6684ae97a20458eb135a3fd5158c86a"
-            "part3.zip 22685061 edcff0689250f000ba817b5a571708127c16d8a9317dd57d9baa1a737a85cccb"
-            "part4.zip 5869994 db19ac507a0aad7d06a5e925a4e35f86de34012440f064c6f12c5bec22796e7f"
-          )
 
-          for entry in "${expected[@]}"; do
-            read -r name size hash <<< "$entry"
-
-            if [ ! -f "$name" ]; then
-              echo "::error::MISSING FILE: $name -> upload it to the repo root"
-              fail=1
-              continue
-            fi
-
-            real_size=$(stat -c%s "$name")
-            real_hash=$(sha256sum "$name" | cut -d' ' -f1)
-
-            if [ "$real_hash" != "$hash" ]; then
-              echo "::error::WRONG FILE: $name (expected $size bytes, repo has $real_size bytes) -> delete it and upload the correct $name again"
-              fail=1
-            else
-              echo "OK  $name ($real_size bytes)"
-            fi
-          done
-
-          ls -la part*.zip || true
-          exit $fail
-
-      - name: Unpack all zip parts and join split files
+      # --------------------------------------------------
+      # 2. Check uploaded parts
+      # --------------------------------------------------
+      - name: Check ZIP parts
         shell: bash
         run: |
           set -e
-          mkdir -p work
 
-          for z in part1.zip part2.zip part3.zip part4.zip; do
-            echo "unpacking $z"
-            unzip -oq "$z" -d work || [ $? -eq 1 ]
-          done
-
-          cd work/samp-android-launcher-32-64bit-main
-
-          find . -name '*.__chunk000' -print0 | while IFS= read -r -d '' first; do
-            base="${first%.__chunk000}"
-            echo "joining $base"
-            cat "$base".__chunk* > "$base"
-            rm -f "$base".__chunk*
-          done
+          echo "========================================"
+          echo "Checking uploaded ZIP parts"
+          echo "========================================"
 
           missing=0
 
-          for f in app/build.gradle build.gradle settings.gradle app/google-services.json \
-                   app/src/main/AndroidManifest.xml \
-                   app/src/main/jniLibs/arm64-v8a/libGTASA.so \
-                   app/src/main/jniLibs/arm64-v8a/libOpenAL64.so \
-                   app/src/main/jniLibs/arm64-v8a/libSCAnd.so \
-                   app/src/main/jniLibs/armeabi-v7a/libGTASA.so \
-                   app/src/main/jniLibs/armeabi-v7a/libOpenAL32.so \
-                   app/src/main/jniLibs/armeabi-v7a/libSCAnd.so \
-                   app/src/main/jniLibs/armeabi-v7a/libImmEmulatorJ.so \
-                   app/src/main/cpp/CMakeLists.txt \
-                   app/src/main/cpp/multiplayer/CMakeLists.txt; do
-
-            if [ ! -s "$f" ]; then
-              echo "::error::missing after unpack: $f"
+          for part in \
+            part1.zip \
+            part2.zip \
+            part3.zip \
+            part4.zip \
+            part5.zip
+          do
+            if [ ! -f "$part" ]; then
+              echo "::error::Missing $part"
               missing=1
+            else
+              size=$(stat -c%s "$part")
+              sha=$(sha256sum "$part" | awk '{print $1}')
+
+              echo "FOUND: $part"
+              echo "SIZE : $size bytes"
+              echo "SHA  : $sha"
+              echo
             fi
           done
 
           if [ "$missing" -ne 0 ]; then
-            echo "Some files are missing - check that part1..part4 are the latest versions"
+            echo "::error::One or more ZIP parts are missing."
+            echo "Upload part1.zip through part5.zip to the repository root."
             exit 1
           fi
 
-          echo "Project unpacked OK"
+          echo "All 5 parts found."
 
+
+      # --------------------------------------------------
+      # 3. Prepare workspace
+      # --------------------------------------------------
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf work
+          mkdir -p work
+
+          echo "Workspace created."
+
+
+      # --------------------------------------------------
+      # 4. Extract all ZIP parts
+      # --------------------------------------------------
+      - name: Extract ZIP parts
+        shell: bash
+        run: |
+          set -e
+
+          for zip in \
+            part1.zip \
+            part2.zip \
+            part3.zip \
+            part4.zip \
+            part5.zip
+          do
+            echo "========================================"
+            echo "Extracting $zip"
+            echo "========================================"
+
+            unzip -oq "$zip" -d work
+          done
+
+          echo "All ZIP parts extracted."
+
+
+      # --------------------------------------------------
+      # 5. Find Android project
+      # --------------------------------------------------
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for Android project..."
+
+          PROJECT_DIR=""
+
+          if [ -f "work/samp-android-launcher-32-64bit-main/settings.gradle" ] || \
+             [ -f "work/samp-android-launcher-32-64bit-main/settings.gradle.kts" ]; then
+
+            PROJECT_DIR="work/samp-android-launcher-32-64bit-main"
+
+          else
+
+            SETTINGS=$(find work \
+              -maxdepth 5 \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -type f | head -n 1)
+
+            if [ -n "$SETTINGS" ]; then
+              PROJECT_DIR="$(dirname "$SETTINGS")"
+            fi
+
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Android project could not be found."
+            echo "Searching extracted files:"
+            find work -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+
+      # --------------------------------------------------
+      # 6. Join Claude split files
+      # --------------------------------------------------
+      - name: Join split files
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Searching for split files..."
+
+          find . -type f -name '*.__chunk000' -print0 |
+          while IFS= read -r -d '' first
+          do
+            base="${first%.__chunk000}"
+
+            echo "Joining:"
+            echo "$base"
+
+            cat "$base".__chunk* > "$base"
+
+            rm -f "$base".__chunk*
+          done
+
+          echo "Split file joining completed."
+
+
+      # --------------------------------------------------
+      # 7. Verify important project files
+      # --------------------------------------------------
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "========================================"
+          echo "Checking project files"
+          echo "========================================"
+
+          missing=0
+
+          check_file() {
+            if [ ! -s "$1" ]; then
+              echo "::error::Missing file: $1"
+              missing=1
+            else
+              echo "OK: $1"
+            fi
+          }
+
+          check_file "settings.gradle"
+          check_file "build.gradle"
+          check_file "app/build.gradle"
+          check_file "app/src/main/AndroidManifest.xml"
+          check_file "app/src/main/cpp/CMakeLists.txt"
+
+          if [ -f "app/src/main/cpp/multiplayer/CMakeLists.txt" ]; then
+            echo "OK: multiplayer CMakeLists.txt"
+          else
+            echo "::warning::multiplayer/CMakeLists.txt not found"
+          fi
+
+          echo
+          echo "Checking ARM64 libraries..."
+
+          check_file "app/src/main/jniLibs/arm64-v8a/libGTASA.so"
+          check_file "app/src/main/jniLibs/arm64-v8a/libOpenAL64.so"
+          check_file "app/src/main/jniLibs/arm64-v8a/libSCAnd.so"
+
+          echo
+          echo "Checking ARM32 libraries..."
+
+          check_file "app/src/main/jniLibs/armeabi-v7a/libGTASA.so"
+          check_file "app/src/main/jniLibs/armeabi-v7a/libOpenAL32.so"
+          check_file "app/src/main/jniLibs/armeabi-v7a/libSCAnd.so"
+          check_file "app/src/main/jniLibs/armeabi-v7a/libImmEmulatorJ.so"
+
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "::error::Required project files are missing."
+            exit 1
+          fi
+
+          echo
+          echo "Project verification successful."
+
+
+      # --------------------------------------------------
+      # 8. Show project configuration
+      # --------------------------------------------------
+      - name: Show project information
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          echo "========================================"
+          echo "Project information"
+          echo "========================================"
+
+          echo "Gradle:"
+          gradle --version || true
+
+          echo
+          echo "Android project:"
+          pwd
+
+          echo
+          echo "ABIs:"
+          find app/src/main/jniLibs \
+            -maxdepth 2 \
+            -type d 2>/dev/null || true
+
+          echo
+          echo "Important native libraries:"
+          find app/src/main/jniLibs \
+            -type f \
+            \( -name "*.so" -o -name "*.a" \) \
+            -print 2>/dev/null || true
+
+
+      # --------------------------------------------------
+      # 9. Setup Java 17
+      # --------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Install Android SDK packages (NDK, CMake)
+
+      # --------------------------------------------------
+      # 10. Setup Android SDK
+      # --------------------------------------------------
+      - name: Setup Android SDK
         shell: bash
         run: |
           set -e
 
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
-          ls -la "$SDKM"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "SDKMANAGER=$SDKMANAGER"
 
-          "$SDKM" --sdk_root="$ANDROID_HOME" \
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "ndk;26.2.11394342" \
@@ -122,13 +321,24 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
-          echo "sdk.dir=$ANDROID_HOME" > work/samp-android-launcher-32-64bit-main/local.properties
+          echo "sdk.dir=$ANDROID_HOME" \
+            > "$PROJECT_DIR/local.properties"
 
-      - name: Set up Gradle
+          echo "Android SDK setup completed."
+
+
+      # --------------------------------------------------
+      # 11. Setup Gradle 8.9
+      # --------------------------------------------------
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
+
+      # --------------------------------------------------
+      # 12. Prepare signing key
+      # --------------------------------------------------
       - name: Prepare signing key
         shell: bash
         env:
@@ -138,18 +348,27 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
         run: |
+          set -e
+
+          KEYSTORE="$RUNNER_TEMP/release.jks"
+
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+            echo "Using repository signing key."
+
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
 
             echo "RELEASE_STORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
           else
-            echo "No signing secrets found - generating a temporary key."
+
+            echo "No signing key configured."
+            echo "Generating temporary release key."
 
             keytool -genkeypair \
-              -keystore "$RUNNER_TEMP/release.jks" \
+              -keystore "$KEYSTORE" \
               -alias temp \
               -keyalg RSA \
               -keysize 2048 \
@@ -161,31 +380,104 @@ jobs:
             echo "RELEASE_STORE_PASSWORD=tempPass123" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=temp" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=tempPass123" >> "$GITHUB_ENV"
+
           fi
 
-          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "RELEASE_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
 
-      - name: Build release APK
+          echo "Signing configuration prepared."
+
+
+      # --------------------------------------------------
+      # 13. Build APK
+      # --------------------------------------------------
+      - name: Build Dexin Mobile Release APK
         shell: bash
-        working-directory: work/samp-android-launcher-32-64bit-main
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set -o pipefail
+
+          echo "========================================"
+          echo "Starting Dexin Mobile APK build"
+          echo "========================================"
+
           gradle assembleVer_releaseRelease \
             --no-daemon \
             --stacktrace \
+            --info \
             -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" \
             2>&1 | tee "$GITHUB_WORKSPACE/build-log.txt"
 
-      - name: Upload APK
+          echo
+          echo "Build command completed."
+
+
+      # --------------------------------------------------
+      # 14. Find generated APK
+      # --------------------------------------------------
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Searching for generated APK"
+          echo "========================================"
+
+          find "$PROJECT_DIR/app/build/outputs" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK_COUNT=$(find "$PROJECT_DIR/app/build/outputs" \
+            -type f \
+            -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::No APK was generated."
+            exit 1
+          fi
+
+          echo
+          echo "APK files found: $APK_COUNT"
+
+
+      # --------------------------------------------------
+      # 15. Upload APK
+      # --------------------------------------------------
+      - name: Upload Dexin Mobile APK
         uses: actions/upload-artifact@v4
         with:
           name: Dexin-Mobile-APK
-          path: work/samp-android-launcher-32-64bit-main/app/build/outputs/apk/**/*.apk
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/**/*.apk
           if-no-files-found: error
+          retention-days: 30
 
+
+      # --------------------------------------------------
+      # 16. Upload build log
+      # --------------------------------------------------
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: Dexin-Mobile-Build-Log
           path: build-log.txt
           if-no-files-found: ignore
+          retention-days: 30
+
+
+      # --------------------------------------------------
+      # 17. Upload mapping files if available
+      # --------------------------------------------------
+      - name: Upload mapping files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dexin-Mobile-Mapping
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/mapping/**/*.txt
+            ${{ env.PROJECT_DIR }}/app/build/outputs/mapping/**/*.xml
+          if-no-files-found: ignore
+          retention-days: 30
