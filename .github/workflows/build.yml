@@ -14,29 +14,85 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify uploaded parts
+        shell: bash
+        run: |
+          fail=0
+          expected=(
+            "part1.zip 23968515 4c3c284ac3fc8c02e3444d383d7ccd72382c70d920eeceb359ef6b684244e223"
+            "part2.zip 23961207 6b9552863b454d58b896e728ed16329cb6684ae97a20458eb135a3fd5158c86a"
+            "part3.zip 22685061 edcff0689250f000ba817b5a571708127c16d8a9317dd57d9baa1a737a85cccb"
+            "part4.zip 5869994 db19ac507a0aad7d06a5e925a4e35f86de34012440f064c6f12c5bec22796e7f"
+          )
+
+          for entry in "${expected[@]}"; do
+            read -r name size hash <<< "$entry"
+
+            if [ ! -f "$name" ]; then
+              echo "::error::MISSING FILE: $name -> upload it to the repo root"
+              fail=1
+              continue
+            fi
+
+            real_size=$(stat -c%s "$name")
+            real_hash=$(sha256sum "$name" | cut -d' ' -f1)
+
+            if [ "$real_hash" != "$hash" ]; then
+              echo "::error::WRONG FILE: $name (expected $size bytes, repo has $real_size bytes) -> delete it and upload the correct $name again"
+              fail=1
+            else
+              echo "OK  $name ($real_size bytes)"
+            fi
+          done
+
+          ls -la part*.zip || true
+          exit $fail
+
       - name: Unpack all zip parts and join split files
         shell: bash
         run: |
           set -e
-          ls -la part*.zip
           mkdir -p work
-          # extract in order: part1, part2, ... (later parts overwrite earlier files)
-          for z in $(ls part*.zip | sort -V); do
+
+          for z in part1.zip part2.zip part3.zip part4.zip; do
             echo "unpacking $z"
             unzip -oq "$z" -d work || [ $? -eq 1 ]
           done
+
           cd work/samp-android-launcher-32-64bit-main
-          # join big files that were split into __chunkNNN pieces
+
           find . -name '*.__chunk000' -print0 | while IFS= read -r -d '' first; do
             base="${first%.__chunk000}"
             echo "joining $base"
             cat "$base".__chunk* > "$base"
             rm -f "$base".__chunk*
           done
-          ls -la app/src/main/jniLibs/arm64-v8a/ app/src/main/jniLibs/armeabi-v7a/ | head -30
-          test -f app/build.gradle
-          test -s app/src/main/jniLibs/arm64-v8a/libGTASA.so
-          test -s app/src/main/jniLibs/armeabi-v7a/libGTASA.so
+
+          missing=0
+
+          for f in app/build.gradle build.gradle settings.gradle app/google-services.json \
+                   app/src/main/AndroidManifest.xml \
+                   app/src/main/jniLibs/arm64-v8a/libGTASA.so \
+                   app/src/main/jniLibs/arm64-v8a/libOpenAL64.so \
+                   app/src/main/jniLibs/arm64-v8a/libSCAnd.so \
+                   app/src/main/jniLibs/armeabi-v7a/libGTASA.so \
+                   app/src/main/jniLibs/armeabi-v7a/libOpenAL32.so \
+                   app/src/main/jniLibs/armeabi-v7a/libSCAnd.so \
+                   app/src/main/jniLibs/armeabi-v7a/libImmEmulatorJ.so \
+                   app/src/main/cpp/CMakeLists.txt \
+                   app/src/main/cpp/multiplayer/CMakeLists.txt; do
+
+            if [ ! -s "$f" ]; then
+              echo "::error::missing after unpack: $f"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Some files are missing - check that part1..part4 are the latest versions"
+            exit 1
+          fi
+
           echo "Project unpacked OK"
 
       - name: Set up JDK 17
@@ -49,13 +105,23 @@ jobs:
         shell: bash
         run: |
           set -e
+
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
           ls -la "$SDKM"
+
           yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
-          "$SDKM" --sdk_root="$ANDROID_HOME" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
+
+          "$SDKM" --sdk_root="$ANDROID_HOME" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;26.2.11394342" \
+            "cmake;3.22.1"
+
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
           echo "sdk.dir=$ANDROID_HOME" > work/samp-android-launcher-32-64bit-main/local.properties
 
       - name: Set up Gradle
@@ -70,28 +136,44 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
             echo "RELEASE_STORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
           else
             echo "No signing secrets found - generating a temporary key."
-            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" -alias temp -keyalg RSA -keysize 2048 \
-              -validity 10000 -storepass tempPass123 -keypass tempPass123 -dname "CN=Dexin Mobile"
+
+            keytool -genkeypair \
+              -keystore "$RUNNER_TEMP/release.jks" \
+              -alias temp \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass tempPass123 \
+              -keypass tempPass123 \
+              -dname "CN=Dexin Mobile"
+
             echo "RELEASE_STORE_PASSWORD=tempPass123" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=temp" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=tempPass123" >> "$GITHUB_ENV"
           fi
+
           echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
       - name: Build release APK
         shell: bash
         working-directory: work/samp-android-launcher-32-64bit-main
         run: |
-          gradle assembleVer_releaseRelease --no-daemon --stacktrace \
-            -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" 2>&1 | tee "$GITHUB_WORKSPACE/build-log.txt"
+          gradle assembleVer_releaseRelease \
+            --no-daemon \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-log.txt"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
