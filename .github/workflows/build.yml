@@ -5,55 +5,54 @@ on:
     branches:
       - main
       - master
-
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Dexin Mobile
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
 
-      # --------------------------------------------------
+      # ==================================================
       # 1. Checkout
-      # --------------------------------------------------
-      - name: Checkout repository
+      # ==================================================
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
 
-      # --------------------------------------------------
-      # 2. Check uploaded parts
-      # --------------------------------------------------
-      - name: Check ZIP parts
+      # ==================================================
+      # 2. Check 5 ZIP parts
+      # ==================================================
+      - name: Verify ZIP parts
         shell: bash
         run: |
           set -e
 
-          echo "========================================"
-          echo "Checking uploaded ZIP parts"
-          echo "========================================"
+          echo "=========================================="
+          echo "Checking ZIP parts"
+          echo "=========================================="
 
           missing=0
 
-          for part in \
+          for file in \
             part1.zip \
             part2.zip \
             part3.zip \
             part4.zip \
             part5.zip
           do
-            if [ ! -f "$part" ]; then
-              echo "::error::Missing $part"
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing ZIP: $file"
               missing=1
             else
-              size=$(stat -c%s "$part")
-              sha=$(sha256sum "$part" | awk '{print $1}')
+              size=$(stat -c%s "$file")
+              sha=$(sha256sum "$file" | awk '{print $1}')
 
-              echo "FOUND: $part"
+              echo "FOUND: $file"
               echo "SIZE : $size bytes"
               echo "SHA  : $sha"
               echo
@@ -61,17 +60,16 @@ jobs:
           done
 
           if [ "$missing" -ne 0 ]; then
-            echo "::error::One or more ZIP parts are missing."
-            echo "Upload part1.zip through part5.zip to the repository root."
+            echo "::error::Upload part1.zip through part5.zip to repository root."
             exit 1
           fi
 
-          echo "All 5 parts found."
+          echo "All ZIP parts are present."
 
 
-      # --------------------------------------------------
+      # ==================================================
       # 3. Prepare workspace
-      # --------------------------------------------------
+      # ==================================================
       - name: Prepare workspace
         shell: bash
         run: |
@@ -80,12 +78,12 @@ jobs:
           rm -rf work
           mkdir -p work
 
-          echo "Workspace created."
+          echo "Workspace ready."
 
 
-      # --------------------------------------------------
-      # 4. Extract all ZIP parts
-      # --------------------------------------------------
+      # ==================================================
+      # 4. Extract all 5 parts
+      # ==================================================
       - name: Extract ZIP parts
         shell: bash
         run: |
@@ -98,100 +96,157 @@ jobs:
             part4.zip \
             part5.zip
           do
-            echo "========================================"
+            echo
+            echo "=========================================="
             echo "Extracting $zip"
-            echo "========================================"
+            echo "=========================================="
 
             unzip -oq "$zip" -d work
           done
 
-          echo "All ZIP parts extracted."
+          echo
+          echo "All parts extracted."
 
 
-      # --------------------------------------------------
-      # 5. Find Android project
-      # --------------------------------------------------
-      - name: Find Android project
-        shell: bash
-        run: |
-          set -e
-
-          echo "Searching for Android project..."
-
-          PROJECT_DIR=""
-
-          if [ -f "work/samp-android-launcher-32-64bit-main/settings.gradle" ] || \
-             [ -f "work/samp-android-launcher-32-64bit-main/settings.gradle.kts" ]; then
-
-            PROJECT_DIR="work/samp-android-launcher-32-64bit-main"
-
-          else
-
-            SETTINGS=$(find work \
-              -maxdepth 5 \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-              -type f | head -n 1)
-
-            if [ -n "$SETTINGS" ]; then
-              PROJECT_DIR="$(dirname "$SETTINGS")"
-            fi
-
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Android project could not be found."
-            echo "Searching extracted files:"
-            find work -maxdepth 4 -type f | head -n 200
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Android project:"
-          echo "$PROJECT_DIR"
-
-
-      # --------------------------------------------------
-      # 6. Join Claude split files
-      # --------------------------------------------------
+      # ==================================================
+      # 5. Join Claude chunk files
+      # ==================================================
       - name: Join split files
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          echo "=========================================="
+          echo "Searching for split chunks"
+          echo "=========================================="
 
-          echo "Searching for split files..."
+          chunk_count=$(find work \
+            -type f \
+            -name '*.__chunk000' \
+            | wc -l)
 
-          find . -type f -name '*.__chunk000' -print0 |
+          echo "Chunk groups found: $chunk_count"
+
+          find work \
+            -type f \
+            -name '*.__chunk000' \
+            -print0 |
           while IFS= read -r -d '' first
           do
             base="${first%.__chunk000}"
 
+            echo
             echo "Joining:"
             echo "$base"
 
             cat "$base".__chunk* > "$base"
 
             rm -f "$base".__chunk*
+
+            echo "Joined successfully."
           done
 
-          echo "Split file joining completed."
+          echo
+          echo "Chunk joining finished."
 
 
-      # --------------------------------------------------
-      # 7. Verify important project files
-      # --------------------------------------------------
+      # ==================================================
+      # 6. Locate Android project automatically
+      # ==================================================
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Searching for Android project"
+          echo "=========================================="
+
+          PROJECT_DIR=""
+
+          # First: search for app/build.gradle
+          BUILD_FILE=$(find work \
+            -type f \
+            -path '*/app/build.gradle' \
+            | head -n 1)
+
+          if [ -z "$BUILD_FILE" ]; then
+            BUILD_FILE=$(find work \
+              -type f \
+              -path '*/app/build.gradle.kts' \
+              | head -n 1)
+          fi
+
+          if [ -n "$BUILD_FILE" ]; then
+            PROJECT_DIR=$(dirname "$(dirname "$BUILD_FILE")")
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Could not find Android app/build.gradle."
+            echo
+            echo "Files found inside work:"
+            find work -maxdepth 6 -type f | head -n 300
+            exit 1
+          fi
+
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+
+      # ==================================================
+      # 7. Show native libraries
+      # ==================================================
+      - name: Locate native libraries
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Searching for native libraries"
+          echo "=========================================="
+
+          echo
+          echo "libGTASA.so:"
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "libGTASA.so" \
+            -print || true
+
+          echo
+          echo "libOpenAL:"
+          find "$PROJECT_DIR" \
+            -type f \
+            -iname "libOpenAL*.so" \
+            -print || true
+
+          echo
+          echo "libSCAnd.so:"
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "libSCAnd.so" \
+            -print || true
+
+          echo
+          echo "All .so files:"
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.so" \
+            -print || true
+
+
+      # ==================================================
+      # 8. Verify Android project
+      # ==================================================
       - name: Verify Android project
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
-
-          echo "========================================"
-          echo "Checking project files"
-          echo "========================================"
+          echo "=========================================="
+          echo "Verifying Android project"
+          echo "=========================================="
 
           missing=0
 
@@ -204,79 +259,170 @@ jobs:
             fi
           }
 
-          check_file "settings.gradle"
-          check_file "build.gradle"
-          check_file "app/build.gradle"
-          check_file "app/src/main/AndroidManifest.xml"
-          check_file "app/src/main/cpp/CMakeLists.txt"
+          echo
+          echo "Project files:"
+          echo "------------------------------------------"
 
-          if [ -f "app/src/main/cpp/multiplayer/CMakeLists.txt" ]; then
-            echo "OK: multiplayer CMakeLists.txt"
+          if [ -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "OK: settings.gradle"
+          elif [ -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "OK: settings.gradle.kts"
           else
-            echo "::warning::multiplayer/CMakeLists.txt not found"
+            echo "::error::settings.gradle not found"
+            missing=1
           fi
 
+          if [ -f "$PROJECT_DIR/build.gradle" ]; then
+            echo "OK: build.gradle"
+          elif [ -f "$PROJECT_DIR/build.gradle.kts" ]; then
+            echo "OK: build.gradle.kts"
+          else
+            echo "::error::root build.gradle not found"
+            missing=1
+          fi
+
+          check_file "$PROJECT_DIR/app/build.gradle"
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            check_file "$PROJECT_DIR/app/build.gradle.kts"
+          fi
+
+          check_file "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          if [ -f "$PROJECT_DIR/app/src/main/cpp/CMakeLists.txt" ]; then
+            echo "OK: CMakeLists.txt"
+          else
+            echo "::warning::CMakeLists.txt not found"
+          fi
+
+
+          # ==================================================
+          # Search for ARM64 files instead of assuming paths
+          # ==================================================
+
           echo
-          echo "Checking ARM64 libraries..."
+          echo "ARM64 native libraries:"
+          echo "------------------------------------------"
 
-          check_file "app/src/main/jniLibs/arm64-v8a/libGTASA.so"
-          check_file "app/src/main/jniLibs/arm64-v8a/libOpenAL64.so"
-          check_file "app/src/main/jniLibs/arm64-v8a/libSCAnd.so"
+          ARM64_GTASA=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/arm64-v8a/libGTASA.so' \
+            | head -n 1 || true)
+
+          ARM64_OPENAL=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/arm64-v8a/libOpenAL64.so' \
+            | head -n 1 || true)
+
+          ARM64_SCAND=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/arm64-v8a/libSCAnd.so' \
+            | head -n 1 || true)
+
+          if [ -n "$ARM64_GTASA" ]; then
+            echo "OK: $ARM64_GTASA"
+          else
+            echo "::error::libGTASA.so for ARM64 was not found"
+            missing=1
+          fi
+
+          if [ -n "$ARM64_OPENAL" ]; then
+            echo "OK: $ARM64_OPENAL"
+          else
+            echo "::error::libOpenAL64.so for ARM64 was not found"
+            missing=1
+          fi
+
+          if [ -n "$ARM64_SCAND" ]; then
+            echo "OK: $ARM64_SCAND"
+          else
+            echo "::error::libSCAnd.so for ARM64 was not found"
+            missing=1
+          fi
+
+
+          # ==================================================
+          # Search for ARM32 files
+          # ==================================================
 
           echo
-          echo "Checking ARM32 libraries..."
+          echo "ARM32 native libraries:"
+          echo "------------------------------------------"
 
-          check_file "app/src/main/jniLibs/armeabi-v7a/libGTASA.so"
-          check_file "app/src/main/jniLibs/armeabi-v7a/libOpenAL32.so"
-          check_file "app/src/main/jniLibs/armeabi-v7a/libSCAnd.so"
-          check_file "app/src/main/jniLibs/armeabi-v7a/libImmEmulatorJ.so"
+          ARM32_GTASA=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/armeabi-v7a/libGTASA.so' \
+            | head -n 1 || true)
+
+          ARM32_OPENAL=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/armeabi-v7a/libOpenAL32.so' \
+            | head -n 1 || true)
+
+          ARM32_SCAND=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/armeabi-v7a/libSCAnd.so' \
+            | head -n 1 || true)
+
+          ARM32_IMM=$(find "$PROJECT_DIR" \
+            -type f \
+            -path '*/armeabi-v7a/libImmEmulatorJ.so' \
+            | head -n 1 || true)
+
+          if [ -n "$ARM32_GTASA" ]; then
+            echo "OK: $ARM32_GTASA"
+          else
+            echo "::error::libGTASA.so for ARM32 was not found"
+            missing=1
+          fi
+
+          if [ -n "$ARM32_OPENAL" ]; then
+            echo "OK: $ARM32_OPENAL"
+          else
+            echo "::error::libOpenAL32.so for ARM32 was not found"
+            missing=1
+          fi
+
+          if [ -n "$ARM32_SCAND" ]; then
+            echo "OK: $ARM32_SCAND"
+          else
+            echo "::error::libSCAnd.so for ARM32 was not found"
+            missing=1
+          fi
+
+          if [ -n "$ARM32_IMM" ]; then
+            echo "OK: $ARM32_IMM"
+          else
+            echo "::warning::libImmEmulatorJ.so for ARM32 was not found"
+          fi
+
+
+          # ==================================================
+          # Final verification
+          # ==================================================
+
+          echo
+          echo "=========================================="
 
           if [ "$missing" -ne 0 ]; then
+            echo "::error::Android project verification failed."
             echo
-            echo "::error::Required project files are missing."
+            echo "Full native library tree:"
+            find "$PROJECT_DIR" \
+              -type f \
+              -name "*.so" \
+              -print || true
+
             exit 1
           fi
 
-          echo
-          echo "Project verification successful."
+          echo "Android project verification successful."
+          echo "=========================================="
 
 
-      # --------------------------------------------------
-      # 8. Show project configuration
-      # --------------------------------------------------
-      - name: Show project information
-        shell: bash
-        run: |
-          cd "$PROJECT_DIR"
-
-          echo "========================================"
-          echo "Project information"
-          echo "========================================"
-
-          echo "Gradle:"
-          gradle --version || true
-
-          echo
-          echo "Android project:"
-          pwd
-
-          echo
-          echo "ABIs:"
-          find app/src/main/jniLibs \
-            -maxdepth 2 \
-            -type d 2>/dev/null || true
-
-          echo
-          echo "Important native libraries:"
-          find app/src/main/jniLibs \
-            -type f \
-            \( -name "*.so" -o -name "*.a" \) \
-            -print 2>/dev/null || true
-
-
-      # --------------------------------------------------
-      # 9. Setup Java 17
-      # --------------------------------------------------
+      # ==================================================
+      # 9. Setup JDK 17
+      # ==================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -285,10 +431,10 @@ jobs:
           cache: gradle
 
 
-      # --------------------------------------------------
+      # ==================================================
       # 10. Setup Android SDK
-      # --------------------------------------------------
-      - name: Setup Android SDK
+      # ==================================================
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -e
@@ -297,9 +443,6 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "SDKMANAGER=$SDKMANAGER"
 
           if [ ! -f "$SDKMANAGER" ]; then
             echo "::error::sdkmanager not found."
@@ -324,21 +467,21 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" \
             > "$PROJECT_DIR/local.properties"
 
-          echo "Android SDK setup completed."
+          echo "Android SDK installed."
 
 
-      # --------------------------------------------------
-      # 11. Setup Gradle 8.9
-      # --------------------------------------------------
-      - name: Setup Gradle
+      # ==================================================
+      # 11. Setup Gradle
+      # ==================================================
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
 
-      # --------------------------------------------------
+      # ==================================================
       # 12. Prepare signing key
-      # --------------------------------------------------
+      # ==================================================
       - name: Prepare signing key
         shell: bash
         env:
@@ -354,7 +497,7 @@ jobs:
 
           if [ -n "$KEYSTORE_BASE64" ]; then
 
-            echo "Using repository signing key."
+            echo "Using configured signing key."
 
             echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
 
@@ -364,8 +507,8 @@ jobs:
 
           else
 
-            echo "No signing key configured."
-            echo "Generating temporary release key."
+            echo "No signing secrets found."
+            echo "Creating temporary signing key."
 
             keytool -genkeypair \
               -keystore "$KEYSTORE" \
@@ -385,21 +528,19 @@ jobs:
 
           echo "RELEASE_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
 
-          echo "Signing configuration prepared."
 
-
-      # --------------------------------------------------
-      # 13. Build APK
-      # --------------------------------------------------
-      - name: Build Dexin Mobile Release APK
+      # ==================================================
+      # 13. Build
+      # ==================================================
+      - name: Build Dexin Mobile APK
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -o pipefail
 
-          echo "========================================"
-          echo "Starting Dexin Mobile APK build"
-          echo "========================================"
+          echo "=========================================="
+          echo "Building Dexin Mobile APK"
+          echo "=========================================="
 
           gradle assembleVer_releaseRelease \
             --no-daemon \
@@ -408,43 +549,40 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" \
             2>&1 | tee "$GITHUB_WORKSPACE/build-log.txt"
 
-          echo
-          echo "Build command completed."
 
-
-      # --------------------------------------------------
-      # 14. Find generated APK
-      # --------------------------------------------------
-      - name: Find APK
+      # ==================================================
+      # 14. Find APK
+      # ==================================================
+      - name: Find generated APK
         shell: bash
         run: |
           set -e
 
-          echo "========================================"
-          echo "Searching for generated APK"
-          echo "========================================"
+          echo "=========================================="
+          echo "Generated APK files"
+          echo "=========================================="
 
           find "$PROJECT_DIR/app/build/outputs" \
             -type f \
             -name "*.apk" \
             -print
 
-          APK_COUNT=$(find "$PROJECT_DIR/app/build/outputs" \
+          count=$(find "$PROJECT_DIR/app/build/outputs" \
             -type f \
             -name "*.apk" | wc -l)
 
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "::error::No APK was generated."
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No APK generated."
             exit 1
           fi
 
           echo
-          echo "APK files found: $APK_COUNT"
+          echo "APK count: $count"
 
 
-      # --------------------------------------------------
+      # ==================================================
       # 15. Upload APK
-      # --------------------------------------------------
+      # ==================================================
       - name: Upload Dexin Mobile APK
         uses: actions/upload-artifact@v4
         with:
@@ -455,29 +593,14 @@ jobs:
           retention-days: 30
 
 
-      # --------------------------------------------------
+      # ==================================================
       # 16. Upload build log
-      # --------------------------------------------------
+      # ==================================================
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Dexin-Mobile-Build-Log
           path: build-log.txt
-          if-no-files-found: ignore
-          retention-days: 30
-
-
-      # --------------------------------------------------
-      # 17. Upload mapping files if available
-      # --------------------------------------------------
-      - name: Upload mapping files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Dexin-Mobile-Mapping
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/mapping/**/*.txt
-            ${{ env.PROJECT_DIR }}/app/build/outputs/mapping/**/*.xml
           if-no-files-found: ignore
           retention-days: 30
