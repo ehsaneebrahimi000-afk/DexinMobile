@@ -1,4 +1,4 @@
-name: Dexin APK
+name: Dexin APK 2
 
 on:
   push:
@@ -16,11 +16,24 @@ jobs:
       - name: Check uploaded parts
         shell: bash
         run: |
+          check() {
+            f="$1"; need="$2"
+            if [ ! -f "$f" ]; then echo "::error::MISSING FILE $f - upload it to the repo root"; return 1; fi
+            size=$(stat -c%s "$f")
+            if ! unzip -tq "$f" > /dev/null 2>&1; then
+              echo "::error::$f is NOT a valid zip (size $size bytes) - delete it and upload it again"; return 1
+            fi
+            n=$(unzip -Z1 "$f" | wc -l)
+            echo "$f: $size bytes, $n entries (expected $need)"
+            if [ "$n" -lt "$need" ]; then echo "::error::$f has only $n entries, expected $need - wrong or old file, upload it again"; return 1; fi
+          }
+          bad=0
+          check part1.zip 5 || bad=1
+          check part2.zip 7 || bad=1
+          check fixed_part3.zip 92 || bad=1
+          check fixed_part4.zip 1868 || bad=1
           ls -la *.zip
-          for f in part1.zip part2.zip fixed_part3.zip fixed_part4.zip; do
-            test -f "$f" || { echo "::error::MISSING FILE $f - upload it to the repo root"; exit 1; }
-          done
-          echo "all 4 parts found"
+          exit $bad
 
       - name: Unpack parts
         shell: bash
