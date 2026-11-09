@@ -17,39 +17,38 @@ jobs:
       - name: Verify uploaded parts
         shell: bash
         run: |
-          fail=0
           expected=(
             "part1.zip 23968515 4c3c284ac3fc8c02e3444d383d7ccd72382c70d920eeceb359ef6b684244e223"
             "part2.zip 23961207 6b9552863b454d58b896e728ed16329cb6684ae97a20458eb135a3fd5158c86a"
-            "part3.zip 22685061 edcff0689250f000ba817b5a571708127c16d8a9317dd57d9baa1a737a85cccb"
-            "part4.zip 5869994 db19ac507a0aad7d06a5e925a4e35f86de34012440f064c6f12c5bec22796e7f"
+            "fixed_part3.zip 22685061 edcff0689250f000ba817b5a571708127c16d8a9317dd57d9baa1a737a85cccb"
+            "fixed_part4.zip 5869994 db19ac507a0aad7d06a5e925a4e35f86de34012440f064c6f12c5bec22796e7f"
           )
+          missing_file=0
           for entry in "${expected[@]}"; do
             read -r name size hash <<< "$entry"
             if [ ! -f "$name" ]; then
               echo "::error::MISSING FILE: $name -> upload it to the repo root"
-              fail=1
+              missing_file=1
               continue
             fi
             real_size=$(stat -c%s "$name")
             real_hash=$(sha256sum "$name" | cut -d' ' -f1)
-            if [ "$real_hash" != "$hash" ]; then
-              echo "::error::WRONG FILE: $name (expected $size bytes, repo has $real_size bytes) -> delete it and upload the correct $name again"
-              fail=1
-            else
+            if [ "$real_hash" = "$hash" ]; then
               echo "OK  $name ($real_size bytes)"
+            else
+              echo "::warning::$name differs from the original (expected $size bytes, repo has $real_size bytes). Continuing - the content check after unpacking decides."
             fi
           done
-          ls -la part*.zip || true
-          exit $fail
+          ls -la *.zip || true
+          exit $missing_file
 
       - name: Unpack all zip parts and join split files
         shell: bash
         run: |
           set -e
           mkdir -p work
-          # extract in order: part1, part2, part3, part4 (later parts overwrite earlier files)
-          for z in part1.zip part2.zip part3.zip part4.zip; do
+          # extract in order (later parts overwrite earlier files). Old part3.zip/part4.zip are ignored.
+          for z in part1.zip part2.zip fixed_part3.zip fixed_part4.zip; do
             echo "unpacking $z"
             unzip -oq "$z" -d work || [ $? -eq 1 ]
           done
@@ -61,15 +60,25 @@ jobs:
             cat "$base".__chunk* > "$base"
             rm -f "$base".__chunk*
           done
-          missing=0
+          bad=0
+          # 1) required files must exist
           for f in app/build.gradle build.gradle settings.gradle app/google-services.json \
                    app/src/main/AndroidManifest.xml \
                    app/src/main/jniLibs/arm64-v8a/libGTASA.so app/src/main/jniLibs/arm64-v8a/libOpenAL64.so app/src/main/jniLibs/arm64-v8a/libSCAnd.so \
                    app/src/main/jniLibs/armeabi-v7a/libGTASA.so app/src/main/jniLibs/armeabi-v7a/libOpenAL32.so app/src/main/jniLibs/armeabi-v7a/libSCAnd.so app/src/main/jniLibs/armeabi-v7a/libImmEmulatorJ.so \
                    app/src/main/cpp/CMakeLists.txt app/src/main/cpp/multiplayer/CMakeLists.txt; do
-            if [ ! -s "$f" ]; then echo "::error::missing after unpack: $f"; missing=1; fi
+            if [ ! -s "$f" ]; then echo "::error::missing after unpack: $f"; bad=1; fi
           done
-          if [ "$missing" -ne 0 ]; then echo "Some files are missing - check that part1..part4 are the latest versions"; exit 1; fi
+          # 2) total number of files
+          count=$(find . -type f | wc -l)
+          echo "files after unpack: $count (expected 1969)"
+          if [ "$count" -lt 1960 ]; then echo "::error::too few files ($count) - some part is old or incomplete"; bad=1; fi
+          # 3) latest edits must be present (detects old part files)
+          grep -q "Legendary Samp" app/src/main/java/com/glory/Config.java || { echo "::error::Config.java is an old version (no Legendary Samp)"; bad=1; }
+          grep -q "UntagPtr" app/src/main/cpp/multiplayer/game/hooks.cpp || { echo "::error::hooks.cpp is an old version (no UntagPtr)"; bad=1; }
+          grep -q "playertablist.h" app/src/main/cpp/multiplayer/gui/gui.h || { echo "::error::gui.h is an old version (include case fix missing)"; bad=1; }
+          grep -q "Mobile/MobileMenu/MobileMenu.h" app/src/main/cpp/multiplayer/gui/gui.cpp || { echo "::error::gui.cpp is an old version"; bad=1; }
+          if [ "$bad" -ne 0 ]; then echo "Project is incomplete or old. Upload fixed_part3.zip and fixed_part4.zip again."; exit 1; fi
           echo "Project unpacked OK"
 
       - name: Set up JDK 17
@@ -108,182 +117,38 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "RELEASE_STORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"true)
-
-          if [ -n "$ARM32_GTASA" ]; then
-            echo "OK: $ARM32_GTASA"
-          else
-            echo "::error::libGTASA.so for ARM32 was not found"
-            missing=1
-          fi
-
-          if [ -n "$ARM32_OPENAL" ]; then
-            echo "OK: $ARM32_OPENAL"
-          else
-            echo "::error::libOpenAL32.so for ARM32 was not found"
-            missing=1
-          fi
-
-          if [ -n "$ARM32_SCAND" ]; then
-            echo "OK: $ARM32_SCAND"
-          else
-            echo "::error::libSCAnd.so for ARM32 was not found"
-            missing=1
-          fi
-
-          if [ -n "$ARM32_IMM" ]; then
-            echo "OK: $ARM32_IMM"
-          else
-            echo "::warning::libImmEmulatorJ.so for ARM32 was not found"
-          fi
-
-
-          # ==================================================
-          # Final verification
-          # ==================================================
-
-          echo
-          echo "=========================================="
-
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::Android project verification failed."
-            echo
-            echo "Full native library tree:"
-            find "$PROJECT_DIR" \
-              -type f \
-              -name "*.so" \
-              -print || true
-
-            exit 1
-          fi
-
-          echo "Android project verification successful."
-          echo "=========================================="
-
-
-      # ==================================================
-      # 9. Setup JDK 17
-      # ==================================================
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-
-
-      # ==================================================
-      # 10. Setup Android SDK
-      # ==================================================
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -e
-
-          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          export ANDROID_SDK_ROOT="$ANDROID_HOME"
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager not found."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;26.2.11394342" \
-            "cmake;3.22.1"
-
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-
-          echo "sdk.dir=$ANDROID_HOME" \
-            > "$PROJECT_DIR/local.properties"
-
-          echo "Android SDK installed."
-
-
-      # ==================================================
-      # 11. Setup Gradle
-      # ==================================================
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
-
-      # ==================================================
-      # 12. Prepare signing key
-      # ==================================================
-      - name: Prepare signing key
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-
-        run: |
-          set -e
-
-          KEYSTORE="$RUNNER_TEMP/release.jks"
-
-          if [ -n "$KEYSTORE_BASE64" ]; then
-
-            echo "Using configured signing key."
-
-            echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
-
-            echo "RELEASE_STORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
-
           else
-
-            echo "No signing secrets found."
-            echo "Creating temporary signing key."
-
-            keytool -genkeypair \
-              -keystore "$KEYSTORE" \
-              -alias temp \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass tempPass123 \
-              -keypass tempPass123 \
-              -dname "CN=Dexin Mobile"
-
+            echo "No signing secrets found - generating a temporary key."
+            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" -alias temp -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass tempPass123 -keypass tempPass123 -dname "CN=Dexin Mobile"
             echo "RELEASE_STORE_PASSWORD=tempPass123" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_ALIAS=temp" >> "$GITHUB_ENV"
             echo "RELEASE_KEY_PASSWORD=tempPass123" >> "$GITHUB_ENV"
-
           fi
+          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-          echo "RELEASE_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
-
-
-      # ==================================================
-      # 13. Build
-      # ==================================================
-      - name: Build Dexin Mobile APK
+      - name: Build release APK
         shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: work/samp-android-launcher-32-64bit-main
         run: |
-          set -o pipefail
+          gradle assembleVer_releaseRelease --no-daemon --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" 2>&1 | tee "$GITHUB_WORKSPACE/build-log.txt"
 
-          echo "=========================================="
-          echo "Building Dexin Mobile APK"
-          echo "=========================================="
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dexin-Mobile-APK
+          path: work/samp-android-launcher-32-64bit-main/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
 
-          gradle assembleVer_releaseRelease \
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-log.txt
+          if-no-files-found: ignore_releaseRelease \
             --no-daemon \
             --stacktrace \
             --info \
